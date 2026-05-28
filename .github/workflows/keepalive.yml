@@ -1,0 +1,18 @@
+name: Keepalive
+on:
+  schedule:
+    - cron: '0 0 15 * *'  # 每月15号跑一次，刷活跃度
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep repo active
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Dummy commit to keep alive
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git commit --allow-empty -m "chore: keep repo active"
+          git push
