@@ -57,11 +57,6 @@ jobs:
   auto-reading:
     runs-on: ubuntu-latest
     timeout-minutes: 120  # 2小时超时
-    # renewal 成功后需要写回 WEREAD_CURL_STRING Secret；
-    # fork 仓库默认 GITHUB_TOKEN 无 secrets:write，需配 GH_PAT secret 才能持久化（见 persist 步骤）
-    permissions:
-      contents: read
-      secrets: write
     
     steps:
     - name: Checkout code
@@ -218,69 +213,6 @@ jobs:
         
         # 运行阅读机器人
         python weread-bot.py --config config.yaml
-
-    - name: Persist refreshed cookie to Secret
-      if: always()
-      env:
-        WEREAD_CURL_STRING: ${{ secrets.WEREAD_CURL_STRING }}
-        # fork 仓库默认 GITHUB_TOKEN 无 secrets:write 权限；
-        # 如需持久化 wr_skey，请新建 fine-grained PAT（含 Actions/secrets:write）并存为仓库 Secret GH_PAT
-        GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-      run: |
-        python - <<'PY'
-        import json, os, subprocess, sys
-
-        mapping_file = ".refreshed-skey.json"
-        mapping = {}
-        if os.path.exists(mapping_file):
-            try:
-                with open(mapping_file, encoding="utf-8") as f:
-                    mapping = json.load(f)
-                if not isinstance(mapping, dict):
-                    mapping = {}
-            except (json.JSONDecodeError, OSError) as e:
-                print(f"::warning::读取 {mapping_file} 失败: {e}")
-
-        curl = os.environ.get("WEREAD_CURL_STRING", "")
-        if not mapping:
-            print("::notice::无 wr_skey 刷新记录，跳过持久化（本次可能未触发 renewal）")
-            sys.exit(0)
-        if not curl:
-            print("::warning::WEREAD_CURL_STRING 为空，无法写回 Secret")
-            sys.exit(0)
-
-        changed = False
-        for user, info in mapping.items():
-            old = info.get("old_skey") or ""
-            new = info.get("new_skey") or ""
-            if old and new and old in curl:
-                curl = curl.replace(old, new)
-                changed = True
-                print(f"::notice::已替换用户 {user} 的 wr_skey")
-            elif old and new:
-                print(f"::warning::用户 {user} 的旧 wr_skey 未在 WEREAD_CURL_STRING 中找到（可能已被上次持久化更新），跳过")
-
-        if not changed:
-            print("::notice::无需更新，WEREAD_CURL_STRING 保持不变")
-            sys.exit(0)
-
-        result = subprocess.run(
-            ["gh", "secret", "set", "WEREAD_CURL_STRING"],
-            input=curl.encode("utf-8"),
-            capture_output=True,
-        )
-        if result.returncode != 0:
-            print(f"::error::gh secret set 失败: {result.stderr.decode('utf-8', 'ignore')}")
-            print("::notice::如为 fork 仓库，默认 GITHUB_TOKEN 无 secrets:write 权限，请创建 fine-grained PAT 存为 Secret GH_PAT")
-            sys.exit(1)
-        print("::notice::WEREAD_CURL_STRING 已用刷新后的 wr_skey 更新")
-
-        # 清理映射文件，避免泄露明文 cookie
-        try:
-            os.remove(mapping_file)
-        except OSError:
-            pass
-        PY
 
     - name: Upload runtime artifacts
       if: always()

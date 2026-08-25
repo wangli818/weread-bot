@@ -273,22 +273,6 @@ open config-generator.html
 - 不填写: 沿用全局 `hack.cookie_refresh_ql`
 
 
-### Cookie 自动续期与持久化
-
-微信读书 `wr_skey` 的有效期由服务器控制（约 30 天），客户端无法直接延长；但每次调用 `renewal` 接口会"续期"。本项目已内置两条机制，组合使用可显著降低手动更新 Cookie 的频率：
-
-1. **被动续期（运行时）**：阅读请求失败时自动调用一次 `renewal`，新 `wr_skey` 更新到当前会话内存。
-2. **主动续期 + 写回 Secret（GitHub Actions）**：
-   - 每次 Action 运行结束后，若发生过 renewal，会把新 `wr_skey` 通过 `gh secret set` 写回 `WEREAD_CURL_STRING`，下次运行自动用新值。
-   - 新增独立 workflow `.github/workflows/renew-cookie.yml`，每 6 小时跑一次 `python weread-bot.py --renew-only`，只调用 renewal 续期不阅读，防止 Cookie 长期不调用而过期。
-
-> **前提**：上述机制只能在 `wr_skey` 仍可被 renewal 接口认证时续期；若已彻底失效（被登出/过期），renewal 也会失败，程序会安全跳过写回步骤，需手动重新抓 curl 更新 `WEREAD_CURL_STRING`。
-
-> **fork 仓库权限**：默认 `GITHUB_TOKEN` 无 `secrets:write` 权限，写回会失败。需新建 fine-grained PAT（勾选 Actions / Secrets 读写权限）并存为仓库 Secret `GH_PAT`，persist 步骤会自动优先使用它。
-
-`--renew-only` 模式：仅对每个用户调用一次 Cookie renewal 并把 `old_skey -> new_skey` 映射写入工作区根目录的 `.refreshed-skey.json`（含明文 cookie，位于 `logs/` 之外以避免被 artifact 上传，workflow 读取后立即删除），不启动阅读会话。可手动触发：`python weread-bot.py --config config.yaml --renew-only`。
-
-
 ### 应用配置
 
 | 配置项 | 环境变量 | 默认值 | 说明 |

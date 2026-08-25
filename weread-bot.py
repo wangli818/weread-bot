@@ -3369,9 +3369,6 @@ class WeReadSessionManager:
     READ_URL = "https://weread.qq.com/web/book/read"
     RENEW_URL = "https://weread.qq.com/web/login/renewal"
     FIX_SYNCKEY_URL = "https://weread.qq.com/web/book/chapterInfos"
-    # renewal 成功后，把 old_skey -> new_skey 映射写到这里，供 workflow 写回 Secret。
-    # 文件含明文 cookie，放在 logs/ 之外以避免被 artifact 上传；workflow 读取后应删除。
-    REFRESHED_SKEY_FILE = ".refreshed-skey.json"
 
     # 默认请求数据
     DEFAULT_DATA = {
@@ -4057,12 +4054,10 @@ class WeReadSessionManager:
                 )
                 return False
 
-            old_skey = self.cookies.get('wr_skey')
             self.cookies['wr_skey'] = new_skey
             logging.info(
                 "✅ Cookie刷新成功，新密钥: %s", _secret_marker(new_skey)
             )
-            self._persist_refreshed_skey(old_skey, new_skey)
             return True
 
         except Exception as e:
@@ -4077,43 +4072,6 @@ class WeReadSessionManager:
             )
 
         return False
-
-    def _persist_refreshed_skey(
-        self, old_skey: Optional[str], new_skey: str
-    ) -> None:
-        """把 renewal 得到的 old_skey -> new_skey 映射持久化到
-        ``.refreshed-skey.json``，供 workflow 用 ``gh secret set`` 写回
-        ``WEREAD_CURL_STRING``。
-
-        文件含明文 cookie，位于 ``logs/`` 之外以避免被 artifact 上传；
-        workflow 读取后应删除该文件。失败仅记日志，不影响 renewal 主流程。
-        """
-        try:
-            path = Path(self.REFRESHED_SKEY_FILE)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            data: Dict[str, Any] = {}
-            if path.exists():
-                try:
-                    loaded = json.loads(path.read_text(encoding="utf-8"))
-                    if isinstance(loaded, dict):
-                        data = loaded
-                except (json.JSONDecodeError, OSError):
-                    data = {}
-            data[self.user_name] = {
-                "old_skey": old_skey,
-                "new_skey": new_skey,
-                "refreshed_at": datetime.now().isoformat(),
-            }
-            path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            logging.info(
-                "💾 已记录 wr_skey 刷新映射到 %s（供 workflow 写回 Secret）",
-                self.REFRESHED_SKEY_FILE,
-            )
-        except Exception as e:
-            logging.warning("写入 wr_skey 刷新映射失败: %s", e)
 
     async def _fix_no_synckey(self):
         """修复synckey问题
@@ -4865,24 +4823,11 @@ def parse_arguments(argv: Optional[List[str]] = None):
         help="显示最近一次真实执行结果并退出"
     )
 
-    parser.add_argument(
-        "--renew-only",
-        action="store_true",
-        help="仅对每个用户调用一次 Cookie renewal 并持久化新 wr_skey，不启动阅读会话；"
-             "供定时续期任务调用，避免 cookie 长期不调用而过期"
-    )
-
     return parser.parse_args(argv)
 
 
-async def _validate_curl_configs(
-    config: WeReadConfig, require_position: bool = True
-) -> None:
-    """验证全部 CURL 来源，不发起网络请求。
-
-    ``require_position=False`` 时跳过"可用阅读位置"校验，供
-    ``--renew-only`` 等只刷新 cookie 不阅读的场景使用。
-    """
+async def _validate_curl_configs(config: WeReadConfig) -> None:
+    """验证全部 CURL 来源，不发起网络请求。"""
     if config.users:
         logging.info("🔍 验证多用户CURL配置，共 %s 个用户", len(config.users))
         sources = [
@@ -4949,7 +4894,7 @@ async def _validate_curl_configs(
         has_book_position = any(
             book.book_id and book.chapters for book in config.reading.books
         )
-        if require_position and not (
+        if not (
             (use_curl_position and has_curl_position)
             or (fallback_to_books and has_book_position)
         ):
@@ -4959,59 +4904,6 @@ async def _validate_curl_configs(
             )
 
     logging.info("✅ 所有CURL配置验证通过")
-
-
-async def _run_renew_only(config: WeReadConfig) -> int:
-    """仅对每个用户调用一次 Cookie renewal 并把新 wr_skey 持久化到
-    ``.refreshed-skey.json``，不启动阅读会话。
-
-    供定时续期任务调用，避免 cookie 长期不调用而过期。renewal 失败
-    不会抛异常，只记日志；只要至少一个用户刷新成功即返回 0。
-    """
-    if config.users:
-        sources = [(user.name, user) for user in config.users]
-    else:
-        sources = [("default", None)]
-
-    any_refreshed = False
-    for user_name, user_config in sources:
-        session: Optional[WeReadSessionManager] = None
-        try:
-            session = WeReadSessionManager(config, user_config)
-            logging.info("🔑 仅续期模式：刷新用户 %s 的 cookie", user_name)
-            refreshed = await session._refresh_cookie()
-            if refreshed:
-                any_refreshed = True
-        except Exception as e:
-            logging.error(
-                format_error_message(
-                    f"❌ 用户 {user_name} renewal 失败", e
-                )
-            )
-        finally:
-            if session is not None:
-                try:
-                    await session.http_client.close()
-                except Exception:
-                    pass
-
-    if any_refreshed:
-        logging.info("✅ renew-only 完成，至少一个用户 cookie 已刷新")
-        return 0
-    logging.error("❌ renew-only 完成，但没有用户成功刷新 cookie")
-    # 整体失败时发通知（复用项目通知通道，受 only_on_failure / triggers 控制）
-    try:
-        error_msg = (
-            "❌ Cookie 续期任务失败：所有用户 renewal 均未成功，"
-            "wr_skey 可能已彻底失效，需手动更新 WEREAD_CURL_STRING"
-        )
-        notification_service = NotificationService(config.notification)
-        await notification_service.send_notification_async(
-            error_msg, event=NotificationEvent.RUNTIME_ERROR
-        )
-    except Exception as e:
-        logging.warning("发送续期失败通知时出错: %s", e)
-    return 1
 
 
 async def main() -> int:
@@ -5027,13 +4919,11 @@ async def main() -> int:
         execution_mode = "validate-config"
     elif args.show_last_run:
         execution_mode = "show-last-run"
-    elif args.renew_only:
-        execution_mode = "renew-only"
 
     required_deps = []
     if Path(args.config).exists() and yaml is None:
         required_deps.append("PyYAML")
-    if execution_mode in ("normal", "renew-only"):
+    if execution_mode == "normal":
         if requests is None:
             required_deps.append("requests")
         if httpx is None:
@@ -5071,10 +4961,8 @@ async def main() -> int:
 
         _validate_runtime_config(config)
 
-        # 验证CURL配置（早期验证）；renew-only 模式只刷新 cookie 不阅读，跳过阅读位置校验
-        await _validate_curl_configs(
-            config, require_position=execution_mode != "renew-only"
-        )
+        # 验证CURL配置（早期验证）
+        await _validate_curl_configs(config)
         curl_validated = True
 
         # 打印启动信息
@@ -5092,9 +4980,6 @@ async def main() -> int:
         if args.validate_config or args.dry_run:
             logging.info("🧪 诊断模式结束，未启动阅读会话")
             return 0
-
-        if execution_mode == "renew-only":
-            return await _run_renew_only(config)
 
         # 创建并运行应用程序
         run_started = True
