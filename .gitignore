@@ -226,3 +226,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TraeCode 工作区临时分享包，不应入库
+.trae-html-share-packages/
