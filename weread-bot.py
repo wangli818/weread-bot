@@ -4999,6 +4999,18 @@ async def _run_renew_only(config: WeReadConfig) -> int:
         logging.info("✅ renew-only 完成，至少一个用户 cookie 已刷新")
         return 0
     logging.error("❌ renew-only 完成，但没有用户成功刷新 cookie")
+    # 整体失败时发通知（复用项目通知通道，受 only_on_failure / triggers 控制）
+    try:
+        error_msg = (
+            "❌ Cookie 续期任务失败：所有用户 renewal 均未成功，"
+            "wr_skey 可能已彻底失效，需手动更新 WEREAD_CURL_STRING"
+        )
+        notification_service = NotificationService(config.notification)
+        await notification_service.send_notification_async(
+            error_msg, event=NotificationEvent.RUNTIME_ERROR
+        )
+    except Exception as e:
+        logging.warning("发送续期失败通知时出错: %s", e)
     return 1
 
 
