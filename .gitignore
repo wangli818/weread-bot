@@ -7,6 +7,9 @@ __pycache__/
 tmp*
 logs/
 
+# Cookie renewal 临时映射文件（含明文 wr_skey，运行后由 workflow 删除）
+.refreshed-skey.json
+
 config.yaml
 
 # C extensions

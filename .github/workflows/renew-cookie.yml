@@ -1,66 +1,24 @@
-name: Auto Reading Bot
+name: Renew Cookie
+
+# 轻量定时续期：每 6 小时调用一次 renewal 接口刷新 wr_skey 并写回 Secret，
+# 防止 cookie 长期不调用而过期。不启动阅读会话，运行很快（通常 < 30s）。
+# 前提：当前 WEREAD_CURL_STRING 里的 wr_skey 仍可被 renewal 接口认证；
+# 若已彻底失效，本任务会安全跳过（不写回任何东西）并触发失败通知，
+# 需手动重新抓 curl 更新 Secret。
 
 on:
-  # 定时触发 - Fork 后如需自动定时运行，请取消下方 schedule 注释
   schedule:
-    - cron: '0 2 * * *'    # UTC 00:00 = 北京时间 08:00
-    - cron: '0 12 * * *'   # UTC 12:00 = 北京时间 20:00
-  
-  # 拉取请求触发，用于测试阅读
-  pull_request:
-    branches: [ main ]
-    paths:
-      - 'weread-bot.py'
-      - 'requirements.txt'
-      - '.github/workflows/auto-reading.yml'
-      - '.github/workflows/ci.yml'
-
-  # 手动触发
+    - cron: '0 */6 * * *'   # 每 6 小时（UTC 00:00/06:00/12:00/18:00）
   workflow_dispatch:
-    inputs:
-      target_duration:
-        description: '阅读时长（分钟，格式：10-20。留空时优先使用仓库 Secret TARGET_DURATION，否则默认 1-2）'
-        required: false
-        default: ''
-        type: string
-      reading_mode:
-        description: '阅读模式'
-        required: false
-        default: 'smart_random'
-        type: choice
-        options:
-        - smart_random
-        - sequential
-        - pure_random
-      notify_enabled:
-        description: '启用通知'
-        required: false
-        default: true
-        type: boolean
-      notify_only_on_failure:
-        description: '仅失败时发送通知'
-        required: false
-        default: false
-        type: boolean
-      history_enabled:
-        description: '启用执行历史持久化'
-        required: false
-        default: true
-        type: boolean
-      history_max_entries:
-        description: '执行历史最多保留多少条'
-        required: false
-        default: '50'
-        type: string
 
 jobs:
-  auto-reading:
+  renew-cookie:
     runs-on: ubuntu-latest
-    timeout-minutes: 120  # 2小时超时
-    # 注意：本文件未声明 permissions 段（fork 仓库禁止声明 secrets: write，
-    # 声明会导致 startup_failure）。写回 Secret 持久化走 GH_PAT + REST API，
-    # 不依赖 GITHUB_TOKEN 权限。
-    
+    timeout-minutes: 5
+    # 注意：fork 仓库禁止 workflow 声明 secrets: write / workflows: write，
+    # 声明会导致 startup_failure，因此不写 permissions 段。
+    # 写回 Secret 持久化走 GH_PAT + gh CLI 的 GH_TOKEN env。
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -75,35 +33,17 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Resolve runtime parameters
-      env:
-        INPUT_TARGET_DURATION: ${{ github.event.inputs.target_duration }}
-        SECRET_TARGET_DURATION: ${{ secrets.TARGET_DURATION }}
-      run: |
-        target_duration="${INPUT_TARGET_DURATION}"
-
-        if [ -z "$target_duration" ]; then
-          target_duration="${SECRET_TARGET_DURATION}"
-        fi
-
-        if [ -z "$target_duration" ]; then
-          target_duration="1-2"
-        fi
-
-        echo "TARGET_DURATION=$target_duration" >> "$GITHUB_ENV"
-
     - name: Create config file
       run: |
         cat > config.yaml <<EOF
         app:
-          name: "WeReadBot-GitHub-Action"
+          name: "WeReadBot-CookieRenew"
           startup_mode: "immediate"
           startup_delay: "1-2"
 
         reading:
-          mode: "${{ github.event.inputs.reading_mode || 'smart_random' }}"
-          # 目标阅读时长（分钟），支持区间随机，格式如："1" 或 "1-2"
-          target_duration: "${TARGET_DURATION}"
+          mode: "smart_random"
+          target_duration: "1-2"
           reading_interval: "30-48"
           use_curl_data_first: true
           fallback_to_config: true
@@ -114,10 +54,6 @@ jobs:
 
         human_simulation:
           enabled: false
-          reading_speed_variation: true
-          break_probability: 0.15
-          break_duration: "10-20"
-          rotate_user_agent: false
 
         network:
           timeout: 30
@@ -126,12 +62,12 @@ jobs:
           rate_limit: 10
 
         notification:
-          enabled: ${{ github.event.inputs.notify_enabled != 'false' }}
+          enabled: true
           include_statistics: true
-          only_on_failure: ${{ github.event.inputs.notify_only_on_failure == 'true' }}
+          only_on_failure: true
           triggers:
-            session_success: ${{ github.event.inputs.notify_only_on_failure != 'true' }}
-            multi_user_summary: ${{ github.event.inputs.notify_only_on_failure != 'true' }}
+            session_success: false
+            multi_user_summary: false
             session_failure: true
             runtime_error: true
             general: true
@@ -145,26 +81,21 @@ jobs:
           console: true
 
         history:
-          enabled: ${{ github.event.inputs.history_enabled != 'false' }}
+          enabled: false
           file: "logs/run-history.json"
-          max_entries: ${{ github.event.inputs.history_max_entries || '50' }}
+          max_entries: 50
           persist_runtime_error: true
         EOF
 
     - name: Create logs directory
       run: mkdir -p logs
 
-    - name: Run WeRead Bot
+    - name: Run Cookie renewal only
       env:
-        # Cookie刷新QL属性，根据不同用户的环境，可能需要设置为True或False来确保cookie刷新正常工作，默认值为false
         HACK_COOKIE_REFRESH_QL: ${{ secrets.HACK_COOKIE_REFRESH_QL }}
-        # 多用户 cURL：在 WEREAD_CURL_STRING 中放置多段 curl，段与段之间至少插入两个空行
         WEREAD_CURL_STRING: ${{ secrets.WEREAD_CURL_STRING }}
-        # 多用户并发控制，未设置默认 1（顺序执行）
         MAX_CONCURRENT_USERS: ${{ secrets.MAX_CONCURRENT_USERS || 1 }}
-        # 单用户连续阅读失败上限，未设置时默认 5
-        MAX_CONSECUTIVE_FAILURES: ${{ secrets.MAX_CONSECUTIVE_FAILURES || 5 }}
-        # 通知相关环境变量
+        # 通知相关环境变量（仅失败时通知，复用 auto-reading 同款通道）
         PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -186,36 +117,19 @@ jobs:
         GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
         GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
         GOTIFY_TITLE: ${{ secrets.GOTIFY_TITLE }}
-        # 代理设置（可选）
-        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-        HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         SERVERCHAN3_UID: ${{ secrets.SERVERCHAN3_UID }}
         SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
         SERVERCHAN3_TAGS: ${{ secrets.SERVERCHAN3_TAGS }}
         SERVERCHAN3_SHORT: ${{ secrets.SERVERCHAN3_SHORT }}
         PUSHDEER_PUSHKEY: ${{ secrets.PUSHDEER_PUSHKEY }}
         PUSHDEER_TYPE: ${{ secrets.PUSHDEER_TYPE }}
-        NOTIFICATION_ONLY_ON_FAILURE: ${{ secrets.NOTIFICATION_ONLY_ON_FAILURE || github.event.inputs.notify_only_on_failure == 'true' || 'false' }}
-        HISTORY_ENABLED: ${{ secrets.HISTORY_ENABLED || github.event.inputs.history_enabled == 'true' || 'true' }}
-        HISTORY_FILE: ${{ secrets.HISTORY_FILE || 'logs/run-history.json' }}
-        HISTORY_MAX_ENTRIES: ${{ secrets.HISTORY_MAX_ENTRIES || github.event.inputs.history_max_entries || '50' }}
-        HISTORY_PERSIST_RUNTIME_ERROR: ${{ secrets.HISTORY_PERSIST_RUNTIME_ERROR || 'true' }}
-        # 其他环境变量
+        NOTIFICATION_ONLY_ON_FAILURE: ${{ secrets.NOTIFICATION_ONLY_ON_FAILURE || 'true' }}
         TZ: 'Asia/Shanghai'
       run: |
-        echo "开始自动阅读任务..."
+        echo "开始 Cookie 续期任务..."
         echo "当前时间: $(date)"
-        echo "运行参数:"
-        echo "- 阅读时长: ${TARGET_DURATION}"
-        echo "- 阅读模式: ${{ github.event.inputs.reading_mode || 'smart_random' }}"
-        echo "- 启用通知: ${{ github.event.inputs.notify_enabled != 'false' }}"
-        echo "- 仅失败通知: ${{ github.event.inputs.notify_only_on_failure == 'true' }}"
-        echo "- 历史持久化: ${{ github.event.inputs.history_enabled != 'false' }}"
-        echo "- 历史保留条数: ${{ github.event.inputs.history_max_entries || '50' }}"
         echo "================================"
-        
-        # 运行阅读机器人
-        python weread-bot.py --config config.yaml
+        python weread-bot.py --config config.yaml --renew-only
 
     - name: Persist refreshed cookie to Secret
       if: always()
@@ -244,7 +158,7 @@ jobs:
         curl = os.environ.get("WEREAD_CURL_STRING", "")
         gh_token = os.environ.get("GH_TOKEN", "")
         if not mapping:
-            print("::notice::无 wr_skey 刷新记录，跳过持久化（本次可能未触发 renewal）")
+            print("::notice::无 wr_skey 刷新记录，跳过持久化（renewal 可能未触发或已失败）")
             sys.exit(0)
         if not curl:
             print("::warning::WEREAD_CURL_STRING 为空，无法写回 Secret")
@@ -289,13 +203,11 @@ jobs:
             pass
         PY
 
-    - name: Upload runtime artifacts
+    - name: Upload renewal log
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: weread-runtime-${{ github.run_id }}
-        path: |
-          logs/weread.log
-          logs/run-history.json
+        name: weread-renew-${{ github.run_id }}
+        path: logs/weread.log
         if-no-files-found: warn
-        retention-days: 7
+        retention-days: 3
