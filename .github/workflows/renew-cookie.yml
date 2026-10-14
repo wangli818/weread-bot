@@ -15,9 +15,11 @@ jobs:
   renew-cookie:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # 注意：fork 仓库禁止 workflow 声明 secrets: write / workflows: write，
-    # 声明会导致 startup_failure，因此不写 permissions 段。
+    # 仅声明最小 permissions（contents: read），避开 fork 仓库禁用的
+    # secrets: write / workflows: write，否则 startup_failure。
     # 写回 Secret 持久化走 GH_PAT + gh CLI 的 GH_TOKEN env。
+    permissions:
+      contents: read
 
     steps:
     - name: Checkout code
@@ -204,10 +206,11 @@ jobs:
         PY
 
     - name: Upload renewal log
-      if: always()
+      # PR 触发的运行不再上传，避免派生仓库场景泄露 weread.log
+      if: always() && github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
         name: weread-renew-${{ github.run_id }}
         path: logs/weread.log
         if-no-files-found: warn
-        retention-days: 3
+        retention-days: 1

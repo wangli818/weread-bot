@@ -57,9 +57,11 @@ jobs:
   auto-reading:
     runs-on: ubuntu-latest
     timeout-minutes: 120  # 2小时超时
-    # 注意：本文件未声明 permissions 段（fork 仓库禁止声明 secrets: write，
-    # 声明会导致 startup_failure）。写回 Secret 持久化走 GH_PAT + REST API，
-    # 不依赖 GITHUB_TOKEN 权限。
+    # 仅声明最小 permissions（contents: read），避开 fork 仓库禁用的
+    # secrets: write / workflows: write，否则 startup_failure。
+    # 写回 Secret 持久化走 GH_PAT + REST API，不依赖 GITHUB_TOKEN 权限。
+    permissions:
+      contents: read
     
     steps:
     - name: Checkout code
@@ -290,7 +292,8 @@ jobs:
         PY
 
     - name: Upload runtime artifacts
-      if: always()
+      # PR 触发的运行不再上传，避免仓库代码派生场景泄露 logs/weread.log 和 run-history.json
+      if: always() && github.event_name != 'pull_request'
       uses: actions/upload-artifact@v4
       with:
         name: weread-runtime-${{ github.run_id }}
@@ -298,4 +301,4 @@ jobs:
           logs/weread.log
           logs/run-history.json
         if-no-files-found: warn
-        retention-days: 7
+        retention-days: 1

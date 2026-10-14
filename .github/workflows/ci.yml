@@ -21,6 +21,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 仅需 checkout 读源码，避开过量权限
+    permissions:
+      contents: read
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12']
