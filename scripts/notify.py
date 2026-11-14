@@ -121,6 +121,12 @@ def build_notification_service(bot: ModuleType, config: object) -> object:
                 payload.get("code"),
                 payload.get("msg"),
             )
+            if payload.get("code") == 1001:
+                logging.error(
+                    "   1001 表示库里查不到这个 SPT：多半是把「应用管理」里的 "
+                    "AppToken 当成了个人 SPT，或该账号还没扫码关注任何应用。"
+                    "请在 WxPusher「我的」页面重新复制 SPT（AT_ 开头）"
+                )
             return False
 
     return VerifyingService(config)
