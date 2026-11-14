@@ -101,12 +101,18 @@ def build_notification_service(bot: ModuleType, config: object) -> object:
                 logging.error("❌ 缺少 requests，无法发送 WxPusher 通知")
                 return False
 
+            # WxPusher 的极简接口把正文放在 URL 路径里，实测这两种写法都不行：
+            #   正文含 "/"（如 Asia/Shanghai、https://...）
+            #     原样保留 → 多出一段路径 → HTTP 404
+            #     转义成 %2F → 服务端拒绝   → HTTP 400
+            # 所以先把斜杠换成全角 "／"，再整体做"不保留任何安全字符"的百分号编码。
+            safe_message = message.replace("/", "／")
             url = (
                 "https://wxpusher.zjiecode.com/api/send/message/"
-                f"{spt}/{urllib.parse.quote(message)}"
+                f"{spt}/{urllib.parse.quote(safe_message, safe='')}"
             )
             try:
-                response = requests.get(url, timeout=10)
+                response = requests.get(url, timeout=15)
                 response.raise_for_status()
                 payload = response.json()
             except Exception as exc:
