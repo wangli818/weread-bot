@@ -229,3 +229,7 @@ __marimo__/
 
 # TraeCode 工作区临时分享包，不应入库
 .trae-html-share-packages/
+
+# 看门狗本地运行产生的告警正文
+watchdog-message.txt
+__pycache__/

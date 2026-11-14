@@ -197,6 +197,22 @@ on:
     - cron: '0 12 * * *'   # UTC 12:00 = 北京时间 20:00
 ```
 
+#### 定时漏跑告警（可选）
+
+GitHub 的 `schedule` 是"尽力而为"：不触发不会报错，也不会在 Actions 里留下任何痕迹。实测还有一种更糟的情况——**长期没有 push 的 fork，定时器会被静默停用**，可能连续几天一次都不跑，push 一次才恢复。
+
+`.github/workflows/schedule-watchdog.yml` 用来兜住这种情况：每天在"应该跑过之后"查一次本仓库当天有没有 `event=schedule` 的运行记录，有就静默退出，没有就通过你已配置的通知通道发一条告警（每天最多一条）。它不需要额外配置，直接复用 `PUSHPLUS_TOKEN`、`TELEGRAM_BOT_TOKEN` 等现有 Secret。
+
+| 配置点 | 位置 | 说明 |
+|--------|------|------|
+| 判定时刻 | `schedule-watchdog.yml` 的 `cron: '17 11 * * *'` | UTC 11:17 = 北京时间 19:17；要早一点判就往前挪，但别早于"预期时刻 + 宽限期" |
+| 宽限期 | `inputs.grace_hours`，默认 `8` | 槽位过后等多久才判定漏跑。本项目实测延迟 4~8 小时，故默认 8 |
+| 被监控对象 | `scripts/watchdog.py --workflow auto-reading.yml` | 改成 `renew-cookie.yml` 也能监控续期任务 |
+
+手动验证通道：Actions → Schedule Watchdog → Run workflow → 勾选 `force_alert`，能收到测试消息就说明通道是通的。
+
+另外，`auto-reading.yml` 末尾的 `Notify on startup failure` 步骤会在**阅读会话还没开始就失败**时补发通知（例如 Secret 缺失、`WEREAD_CURL_STRING` 校验不通过）。这类失败发生在 `weread-bot.py` 发出通知之前，原本是静默的。bot 自身进入会话后失败的场景，仍由它自己发送报告，不会重复。
+
 ## ⚙️ 配置参数说明
 
 ### 阅读模式

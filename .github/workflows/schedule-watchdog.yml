@@ -1,0 +1,133 @@
+name: Schedule Watchdog
+
+# 为什么需要这个 workflow
+# ----------------------
+# GitHub 的 schedule 是"尽力而为"：不触发不会报错，也不会在 Actions 里留下任何痕迹，
+# 你只能看到"今天什么都没有"。这个仓库的实测数据：
+#   · 2026-10-09 ~ 10-15、2026-11-07 ~ 11-13 两段时间，定时器整体静默，一次都没跑；
+#   · 正常时也会比 cron 晚 4~8 小时启动，偶尔直接被丢弃。
+# 所以这里每天在"应该跑过之后"核对一次：今天到底有没有 event=schedule 的运行记录。
+# 有 → 静默退出；没有 → 发一条通知（每天最多一条，不会刷屏）。
+
+on:
+  schedule:
+    # UTC 11:17 = 北京时间 19:17
+    # 刻意避开整点：GitHub 在每小时 00 分排队最拥挤，容易延迟甚至丢运行，
+    # 本项目原来的 '0 2 * * *' 就被拖到 5~8 小时后才跑。
+    # 19:17 时 10:17 那一班已过 9 小时宽限，判定不会误报；同时仍早于 20:43 那一班。
+    - cron: '17 11 * * *'
+
+  workflow_dispatch:
+    inputs:
+      force_alert:
+        description: '强制发送一条测试通知（用来验证通知通道是否配好）'
+        required: false
+        default: false
+        type: boolean
+      grace_hours:
+        description: '宽限小时数：槽位过后多久才判定漏跑'
+        required: false
+        default: '8'
+        type: string
+
+# 只读：读取本仓库的 Actions 运行记录，够用即可，避免触发 fork 的权限限制
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: schedule-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # notify.py 会加载 weread-bot.py 复用它的通知通道实现，因此需要同一套依赖
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Check today's schedule
+      id: check
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        python scripts/watchdog.py \
+          --repo "$GITHUB_REPOSITORY" \
+          --workflow auto-reading.yml \
+          --grace-hours "${{ github.event.inputs.grace_hours || '8' }}" \
+          --message-file "$RUNNER_TEMP/watchdog-message.txt"
+
+    - name: Send alert
+      if: steps.check.outputs.missing == 'true' || github.event.inputs.force_alert == 'true'
+      continue-on-error: true
+      env:
+        # 与 auto-reading.yml 使用同一批 Secret，无需额外配置
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        WXPUSHER_SPT: ${{ secrets.WXPUSHER_SPT }}
+        APPRISE_URL: ${{ secrets.APPRISE_URL }}
+        BARK_SERVER: ${{ secrets.BARK_SERVER }}
+        BARK_DEVICE_KEY: ${{ secrets.BARK_DEVICE_KEY }}
+        BARK_SOUND: ${{ secrets.BARK_SOUND }}
+        NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+        NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+        FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        FEISHU_MSG_TYPE: ${{ secrets.FEISHU_MSG_TYPE }}
+        WEWORK_WEBHOOK_URL: ${{ secrets.WEWORK_WEBHOOK_URL }}
+        WEWORK_MSG_TYPE: ${{ secrets.WEWORK_MSG_TYPE }}
+        DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+        DINGTALK_MSG_TYPE: ${{ secrets.DINGTALK_MSG_TYPE }}
+        GOTIFY_SERVER: ${{ secrets.GOTIFY_SERVER }}
+        GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+        GOTIFY_PRIORITY: ${{ secrets.GOTIFY_PRIORITY }}
+        GOTIFY_TITLE: ${{ secrets.GOTIFY_TITLE }}
+        SERVERCHAN3_UID: ${{ secrets.SERVERCHAN3_UID }}
+        SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
+        SERVERCHAN3_TAGS: ${{ secrets.SERVERCHAN3_TAGS }}
+        SERVERCHAN3_SHORT: ${{ secrets.SERVERCHAN3_SHORT }}
+        PUSHDEER_PUSHKEY: ${{ secrets.PUSHDEER_PUSHKEY }}
+        PUSHDEER_TYPE: ${{ secrets.PUSHDEER_TYPE }}
+      run: |
+        message_file="$RUNNER_TEMP/watchdog-message.txt"
+
+        if [ -f "$message_file" ]; then
+          echo "发送漏跑告警"
+          python scripts/notify.py "$(cat "$message_file")" --event general
+        else
+          # 手动点 force_alert 测试通道时，看门狗可能判定"正常"没写文件
+          echo "看门狗判定正常，发送通道测试消息"
+          python scripts/notify.py "$(printf '%s\n' \
+            '🔔 定时看门狗通道测试' \
+            '' \
+            "仓库：${GITHUB_REPOSITORY}" \
+            "时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')（北京时间）" \
+            '' \
+            '能看到这条，说明漏跑告警的通道是通的。')" --event general
+        fi
+
+    - name: Summary
+      if: always()
+      run: |
+        {
+          echo "### 定时看门狗"
+          echo ""
+          echo "- 判定结果：${{ steps.check.outputs.missing == 'true' && '**漏跑，已发通知**' || '正常 / 未到判定时间' }}"
+          echo "- 宽限期：${{ github.event.inputs.grace_hours || '8' }} 小时"
+          echo "- 判定时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')（北京时间）"
+        } >> "$GITHUB_STEP_SUMMARY"
