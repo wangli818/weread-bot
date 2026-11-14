@@ -25,9 +25,15 @@ import importlib.util
 import logging
 import os
 import sys
+import urllib.parse
 from pathlib import Path
 from types import ModuleType
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import requests
+except ImportError:  # 依赖没装好时仍要能进到"没有通道"的分支给出提示
+    requests = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOT_PATH = REPO_ROOT / "weread-bot.py"
@@ -74,6 +80,72 @@ def build_notification_config(
     channels = manager._load_notification_channels({})
     config = bot.NotificationConfig(enabled=True, channels=channels)
     return config, "环境变量"
+
+
+def build_notification_service(bot: ModuleType, config: object) -> object:
+    """构造通知服务，并修正 WxPusher 的"HTTP 200 即成功"误判。
+
+    WxPusher 的极简接口在失败时同样返回 HTTP 200，只是 body 里
+    ``code`` 不是 1000（例如 SPT 错误是 1001）。weread-bot.py 的实现只做了
+    ``raise_for_status()``，于是"发送失败"会被报成"✅ 发送成功"。
+    这里只覆写这一个方法补上响应体校验，其余通道完全走原实现。
+    """
+
+    class VerifyingService(bot.NotificationService):
+        def _send_wxpusher(self, message: str, wx_config: Dict[str, Any]) -> bool:
+            spt = wx_config.get("spt")
+            if not spt:
+                logging.error("❌ WxPusher SPT 未配置")
+                return False
+            if requests is None:
+                logging.error("❌ 缺少 requests，无法发送 WxPusher 通知")
+                return False
+
+            url = (
+                "https://wxpusher.zjiecode.com/api/send/message/"
+                f"{spt}/{urllib.parse.quote(message)}"
+            )
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                payload = response.json()
+            except Exception as exc:
+                logging.error("❌ WxPusher 请求失败: %s", type(exc).__name__)
+                return False
+
+            if payload.get("code") == 1000:
+                logging.info("✅ WxPusher 通知发送成功")
+                return True
+            logging.error(
+                "❌ WxPusher 返回错误: code=%s msg=%s",
+                payload.get("code"),
+                payload.get("msg"),
+            )
+            return False
+
+    return VerifyingService(config)
+
+
+class CaptureHandler(logging.Handler):
+    """收集通知服务自己的状态行（✅ / ❌ / ⚠️），供 Job Summary 展示。
+
+    这些行原本只出现在步骤日志里，需要点开折叠才看得到；把它们推到
+    Summary，才能"一眼看出哪个通道成了/没成"。
+    """
+
+    PREFIXES = ("✅", "❌", "⚠️", "📊", "🔕")
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.lines: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = record.getMessage().lstrip()
+        except Exception:
+            return
+        if text.startswith(self.PREFIXES):
+            self.lines.append(text)
 
 
 def active_channel_names(channels: List[object]) -> List[str]:
@@ -180,25 +252,41 @@ def main(argv: Optional[List[str]] = None) -> int:
         ])
         return 0
 
-    service = bot.NotificationService(config)
-    ok = service.send_notification(message, event=bot.NotificationEvent(args.event))
+    service = build_notification_service(bot, config)
+    capture = CaptureHandler()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(capture)
+    try:
+        ok = service.send_notification(
+            message, event=bot.NotificationEvent(args.event)
+        )
+    finally:
+        root_logger.removeHandler(capture)
+
+    detail = ["", "通道明细："] + [f"- {line}" for line in capture.lines[-8:]]
     if not ok:
-        write_step_summary([
-            "### ❌ 通知发送失败",
-            "",
-            f"- 通道：{', '.join(names)}",
-            "- 请检查 token / webhook 是否有效，或该通道的日志输出",
-        ])
+        write_step_summary(
+            [
+                "### ❌ 通知发送失败",
+                "",
+                f"- 尝试的通道：{', '.join(names)}",
+                "- 请核对 token / webhook 是否有效（明细见下）",
+            ]
+            + detail
+        )
         logging.error("通知发送失败，请检查通道配置与网络")
         return 1
 
-    write_step_summary([
-        "### ✅ 通知已发送",
-        "",
-        f"- 通道：{', '.join(names)}",
-        f"- 配置来源：`{source}`",
-        f"- 事件：`{args.event}`",
-    ])
+    write_step_summary(
+        [
+            "### ✅ 通知已发送",
+            "",
+            f"- 通道：{', '.join(names)}",
+            f"- 配置来源：`{source}`",
+            f"- 事件：`{args.event}`",
+        ]
+        + detail
+    )
     return 0
 
 
