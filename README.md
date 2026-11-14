@@ -6,7 +6,7 @@
 [![Python](https://img.shields.io/badge/python-3.9+-blue?style=flat-square)](https://www.python.org/)
 [![GitHub license](https://img.shields.io/github/license/funnyzak/weread-bot?style=flat-square)](https://github.com/funnyzak/weread-bot/blob/main/LICENSE)
 
-WeRead Bot 是一个易用的微信读书自动阅读机器人，通过模拟真实用户阅读行为来积累阅读时长，支持多用户、多种运行模式（立即执行、定时任务、守护进程）、执行历史和多平台通知，适用于需要提升微信读书等级或完成阅读任务的用户场景。
+WeRead Bot 是一个的微信读书自动阅读机器人，通过模拟真实用户阅读行为来积累阅读时长，支持多用户、多种运行模式（立即执行、定时任务、守护进程）、执行历史和多平台通知，适用于需要提升微信读书等级或完成阅读任务的用户场景。
 
 运行代码集中在 `weread-bot.py`。下载该文件并安装 `requirements.txt` 中的依赖即可运行。
 
