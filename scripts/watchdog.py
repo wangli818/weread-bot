@@ -195,22 +195,24 @@ def build_message(
     tz: tzinfo,
     tz_label: str,
     now: datetime,
-    expected: datetime,
+    expected: Sequence[datetime],
     today_runs: Sequence[Dict[str, object]],
     dispatch_runs: Sequence[Dict[str, object]],
     all_runs: Sequence[Dict[str, object]],
 ) -> str:
-    """生成告警正文。"""
-    waited_hours = (now - expected).total_seconds() / 3600
+    """生成告警正文。``expected`` 是被判定那一天的全部排班时刻。"""
+    day_label = expected[0].strftime("%m-%d")
+    slot_text = "、".join(f"{slot:%H:%M}" for slot in expected)
+    waited_hours = (now - expected[0]).total_seconds() / 3600
     actions_url = f"https://github.com/{repo}/actions/workflows/{workflow}"
 
     lines = [
-        "⏰ 微信读书定时任务没有触发",
+        "⏰ 微信读书定时任务今天没有触发",
         "",
         f"仓库：{repo}",
-        f"本应：{expected:%m-%d %H:%M}（{tz_label}）触发，"
-        f"已经过去 {waited_hours:.1f} 小时",
-        f"这之后的 schedule 运行：{len(today_runs)} 次",
+        f"{day_label}（{tz_label}）排了 {len(expected)} 班：{slot_text}",
+        f"到现在（{now:%H:%M}）已经过去 {waited_hours:.1f} 小时，"
+        f"一次 schedule 运行都没有",
     ]
 
     if dispatch_runs:
@@ -219,7 +221,7 @@ def build_message(
             str(latest.get("created_at", ""))
         ).astimezone(tz)
         lines.append(
-            f"这之后的手动运行：{len(dispatch_runs)} 次"
+            f"期间的手动运行：{len(dispatch_runs)} 次"
             f"（最近 {latest_at:%m-%d %H:%M}，说明是你手动补的）"
         )
 
@@ -349,8 +351,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"workflow: {args.workflow}（cron: {cron_text}）")
     print(f"当前时间: {now:%Y-%m-%d %H:%M} {args.timezone}")
 
-    # 最近一个"已经过了宽限期"的槽位；用它而不是"今天第一个"，
-    # 即使本轮自己被延迟到次日凌晨，也不会错位到还没到点的新一天。
+    # 先找出"最近一个已经过了宽限期的槽位"，用它确定要核对哪一天；
+    # 用"最近一个"而不是"今天第一个"，即使本轮自己被延迟到次日凌晨，
+    # 也不会错位到还没到点的新一天。
     passed = [
         slot for slot in slots
         if now >= slot + timedelta(hours=args.grace_hours)
@@ -359,20 +362,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"近两天内没有已过 {args.grace_hours:g} 小时宽限期的槽位，跳过核对")
         return 0
 
-    expected = passed[-1]
-    cutoff = expected.astimezone(timezone.utc)
+    checked_day = passed[-1].date()
+    day_slots = [slot for slot in slots if slot.date() == checked_day]
+    cutoff_slot = day_slots[0]
+    cutoff = cutoff_slot.astimezone(timezone.utc)
     print(
-        f"核对槽位: {expected:%Y-%m-%d %H:%M}（{args.timezone}）"
+        f"核对日期: {checked_day}（{args.timezone}），"
+        f"当天排班: {'、'.join(f'{s:%H:%M}' for s in day_slots)}"
         f"，宽限期 {args.grace_hours:g} 小时"
     )
 
     todays_schedule = runs_since(schedule_runs, cutoff)
     todays_dispatch = runs_since(dispatch_runs, cutoff)
-    print(f"该槽位之后的 schedule 运行: {len(todays_schedule)} 次")
+    print(f"当天 {cutoff_slot:%H:%M} 之后的 schedule 运行: {len(todays_schedule)} 次")
     for run in todays_schedule[:5]:
         print(f"  · {describe_run(run, tz)}")
     if todays_dispatch:
-        print(f"该槽位之后的手动运行: {len(todays_dispatch)} 次")
+        print(f"当天的手动运行: {len(todays_dispatch)} 次")
 
     if todays_schedule:
         print("判定: 正常，定时器有触发，不发通知")
@@ -384,7 +390,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         tz,
         args.timezone,
         now,
-        expected,
+        day_slots,
         todays_schedule,
         todays_dispatch,
         schedule_runs,

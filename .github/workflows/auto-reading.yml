@@ -2,9 +2,14 @@ name: Auto Reading Bot
 
 on:
   # 定时触发 - Fork 后如需自动定时运行，请取消下方 schedule 注释
+  # 每天 3 班、每班约 20 分钟，合计约 1 小时阅读。
+  # 排 3 班的原因：GitHub 的 schedule 是"尽力而为"，实测会比 cron 晚 4~8 小时
+  # 启动（甚至丢弃）。多排几班，即使某一班被拖或被丢，一天里仍能凑够时长。
+  # 全部避开整点（00 分是排队高峰），并让"延迟后的实际时间"落在白天。
   schedule:
-    - cron: '17 2 * * *'   # UTC 02:17 = 北京时间 10:17
-    - cron: '43 12 * * *'  # UTC 12:43 = 北京时间 20:43
+    - cron: '37 22 * * *'  # UTC 22:37 = 北京 06:37（延迟后约上午）
+    - cron: '17 2 * * *'   # UTC 02:17 = 北京 10:17（延迟后约下午）
+    - cron: '43 6 * * *'   # UTC 06:43 = 北京 14:43（延迟后约晚上）
   
   # 拉取请求触发，用于测试阅读
   pull_request:
@@ -19,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       target_duration:
-        description: '阅读时长（分钟，格式：10-20。留空时优先使用仓库 Secret TARGET_DURATION，否则默认 1-2）'
+        description: '阅读时长（分钟，格式：18-22。留空时优先使用仓库 Secret TARGET_DURATION，否则默认 18-22）'
         required: false
         default: ''
         type: string
@@ -57,6 +62,11 @@ jobs:
   auto-reading:
     runs-on: ubuntu-latest
     timeout-minutes: 120  # 2小时超时
+    # 一天 3 班，延迟抖动可能让两班撞在一起。这里让它们排队而不是并行执行：
+    # 同一账号同时开两轮阅读会话容易触发风控（仓库文档也明确不建议）。
+    concurrency:
+      group: weread-auto-reading
+      cancel-in-progress: false
     # 仅声明最小 permissions（contents: read），避开 fork 仓库禁用的
     # secrets: write / workflows: write，否则 startup_failure。
     # 写回 Secret 持久化走 GH_PAT + REST API，不依赖 GITHUB_TOKEN 权限。
@@ -89,7 +99,7 @@ jobs:
         fi
 
         if [ -z "$target_duration" ]; then
-          target_duration="1-2"
+          target_duration="18-22"
         fi
 
         echo "TARGET_DURATION=$target_duration" >> "$GITHUB_ENV"
@@ -199,7 +209,9 @@ jobs:
         PUSHDEER_TYPE: ${{ secrets.PUSHDEER_TYPE }}
         # 手动触发时强制"成功也发通知"（除非你手动勾选了"仅失败时发送通知"），
         # 这样点完 Run workflow 一定能收到本轮结果，不必去页面翻运行记录。
-        NOTIFICATION_ONLY_ON_FAILURE: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.notify_only_on_failure == 'true' && 'true' || 'false') || secrets.NOTIFICATION_ONLY_ON_FAILURE || 'false' }}
+        # 定时触发默认只在失败时通知：一天 3 班，每班都推一份日报会变成刷屏。
+        # 想恢复"每班都报"，把这行末尾的 'true' 改回 'false' 即可。
+        NOTIFICATION_ONLY_ON_FAILURE: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.notify_only_on_failure == 'true' && 'true' || 'false') || secrets.NOTIFICATION_ONLY_ON_FAILURE || 'true' }}
         HISTORY_ENABLED: ${{ secrets.HISTORY_ENABLED || github.event.inputs.history_enabled == 'true' || 'true' }}
         HISTORY_FILE: ${{ secrets.HISTORY_FILE || 'logs/run-history.json' }}
         HISTORY_MAX_ENTRIES: ${{ secrets.HISTORY_MAX_ENTRIES || github.event.inputs.history_max_entries || '50' }}
