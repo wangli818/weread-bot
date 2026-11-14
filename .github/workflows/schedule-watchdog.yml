@@ -72,8 +72,10 @@ jobs:
           --message-file "$RUNNER_TEMP/watchdog-message.txt"
 
     - name: Send alert
+      # 不加 continue-on-error：告警发不出去时，红叉本身就是最后一道信号。
+      # notify.py 在"没有可用通道"时退出码 3，在"发送失败"时退出码 1。
+      id: alert
       if: steps.check.outputs.missing == 'true' || github.event.inputs.force_alert == 'true'
-      continue-on-error: true
       env:
         # 与 auto-reading.yml 使用同一批 Secret，无需额外配置
         PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
@@ -128,6 +130,7 @@ jobs:
           echo "### 定时看门狗"
           echo ""
           echo "- 判定结果：${{ steps.check.outputs.missing == 'true' && '**漏跑，已发通知**' || '正常 / 未到判定时间' }}"
+          echo "- 告警步骤：${{ steps.alert.outcome || 'skipped（本次无需告警）' }}"
           echo "- 宽限期：${{ github.event.inputs.grace_hours || '8' }} 小时"
           echo "- 判定时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M')（北京时间）"
         } >> "$GITHUB_STEP_SUMMARY"

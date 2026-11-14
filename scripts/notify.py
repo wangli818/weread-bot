@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import logging
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -114,6 +115,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def write_step_summary(lines: List[str]) -> None:
+    """把结果写进 Actions 的 Job Summary，运行页面直接可见。
+
+    只写日志是不够的：日志要点开折叠才看得到，而"没配通道"这种问题
+    必须在结果页一眼可见，否则会误以为通知已发出。
+    """
+    path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError:
+        return
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -132,22 +149,56 @@ def main(argv: Optional[List[str]] = None) -> int:
     logging.info("可用通道: %s", ", ".join(names) if names else "无")
 
     if not names:
-        logging.warning(
-            "::warning::没有可用的通知通道，请检查 PUSHPLUS_TOKEN / TELEGRAM_BOT_TOKEN "
-            "等 Secret 是否已配置"
+        # 这里必须"响亮地失败"：没有通道等于告警永远发不出去，
+        # 若静默退出 0，运行记录会显示绿色，问题被彻底掩盖。
+        write_step_summary([
+            "### ❌ 通知未发送：没有可用的通知通道",
+            "",
+            f"- 配置来源：`{source}`",
+            "- 已检查的 Secret：`PUSHPLUS_TOKEN`、`TELEGRAM_BOT_TOKEN` + "
+            "`TELEGRAM_CHAT_ID`、`WXPUSHER_SPT`、`FEISHU_WEBHOOK_URL`、"
+            "`WEWORK_WEBHOOK_URL`、`DINGTALK_WEBHOOK_URL`、`BARK_DEVICE_KEY`、"
+            "`NTFY_TOPIC`、`GOTIFY_TOKEN`、`SERVERCHAN3_SENDKEY`、"
+            "`PUSHDEER_PUSHKEY`、`APPRISE_URL`",
+            "- 处理：仓库 Settings → Secrets and variables → Actions 里补一个通道的 Secret",
+        ])
+        logging.error(
+            "::error::没有可用的通知通道，消息未发送。"
+            "请到仓库 Settings → Secrets and variables → Actions 配置至少一个通道"
+            "（例如 PUSHPLUS_TOKEN），详见本次运行的 Job Summary"
         )
-        return 0
+        return 3
 
     if args.dry_run:
         logging.info("dry-run：跳过后发送，消息内容如下")
         logging.info("----\n%s\n----", message)
+        write_step_summary([
+            "### 🧪 dry-run（未真正发送）",
+            "",
+            f"- 配置来源：`{source}`",
+            f"- 将使用的通道：{', '.join(names)}",
+        ])
         return 0
 
     service = bot.NotificationService(config)
     ok = service.send_notification(message, event=bot.NotificationEvent(args.event))
     if not ok:
+        write_step_summary([
+            "### ❌ 通知发送失败",
+            "",
+            f"- 通道：{', '.join(names)}",
+            "- 请检查 token / webhook 是否有效，或该通道的日志输出",
+        ])
         logging.error("通知发送失败，请检查通道配置与网络")
         return 1
+
+    write_step_summary([
+        "### ✅ 通知已发送",
+        "",
+        f"- 通道：{', '.join(names)}",
+        f"- 配置来源：`{source}`",
+        f"- 事件：`{args.event}`",
+    ])
     return 0
 
 
